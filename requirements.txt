@@ -24,4 +24,6 @@ passlib[bcrypt]==1.7.4
 celery==5.3.4
 redis==5.0.1
 
-urllib3
+urllib3<2
+aiohttp
+requests
