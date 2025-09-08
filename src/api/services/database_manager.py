@@ -222,7 +222,8 @@ class DatabaseManager:
                 'filename': filename,
                 'file_size': len(file_data),
                 'content_type': content_type,
-                'file_hash': file_hash
+                'file_hash': file_hash,
+                'relative_path': metadata.get('relative_path') if metadata else None
             }]
             
             minio_result = self.minio_client.insert(

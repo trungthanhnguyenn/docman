@@ -535,3 +535,134 @@ async def get_document_metadata(
             status_code=500,
             detail=f"Failed to retrieve document metadata: {str(e)}"
         )
+
+
+@router.post("/session/{session_id}/upload-folder", response_model=List[Document])
+async def upload_folder_documents(
+    session_id: str,
+    files: List[UploadFile] = File(...),
+    relative_paths: str = Form(...),  # Changed to str to receive JSON
+    metadata: Optional[str] = Form(None),
+    db_manager: DatabaseManager = Depends(get_database_manager)
+) -> List[Document]:
+    """
+    Upload multiple documents from a folder to a specific session with preserved folder structure.
+
+    Args:
+        session_id: Session identifier
+        files: List of uploaded files from the folder
+        relative_paths: JSON string of relative paths list
+        metadata: Optional document metadata as JSON string
+        db_manager: Database manager instance
+
+    Returns:
+        List[Document]: List of uploaded document information
+
+    Raises:
+        HTTPException: If upload fails or session is invalid
+    """
+    # Parse relative_paths from JSON string
+    import json
+    try:
+        parsed_relative_paths = json.loads(relative_paths)
+        if not isinstance(parsed_relative_paths, list):
+            raise ValueError("relative_paths must be a list")
+    except (json.JSONDecodeError, ValueError) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid relative_paths format: {str(e)}"
+        )
+    
+    if len(files) != len(parsed_relative_paths):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Number of files ({len(files)}) must match number of relative paths ({len(parsed_relative_paths)})"
+        )
+
+    try:
+        uploaded_documents = []
+
+        for file, relative_path in zip(files, parsed_relative_paths):
+            # Generate document ID and user ID
+            document_id = str(uuid.uuid4())
+            user_id = str(uuid.uuid4())
+
+            # Read file content
+            file_content = await file.read()
+
+            # Generate file hash
+            file_hash = hashlib.md5(file_content).hexdigest()
+
+            # Determine content type
+            filename = file.filename or f"document_{document_id}"
+            if filename.endswith(".docx"):
+                content_type = "docx"
+            elif filename.endswith(".pdf"):
+                content_type = "pdf"
+            elif filename.endswith(".txt"):
+                content_type = "txt"
+            else:
+                content_type = "unknown"
+
+            # Create document metadata
+            doc_metadata = DocumentMetadata(
+                document_id=document_id,
+                filename=file.filename or f"document_{document_id}",
+                file_size=len(file_content),
+                content_type=content_type,
+                file_hash=file_hash,
+                chunks_count=0,
+                processing_status="uploaded",
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+                metadata={
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "relative_path": relative_path,  # Preserve folder structure
+                    "custom_metadata": metadata
+                }
+            )
+
+            # Upload document using database manager
+            result = await db_manager.create_document(
+                file_data=file_content,
+                filename=doc_metadata.filename,
+                content_type=doc_metadata.content_type,
+                file_hash=file_hash,
+                document_id=document_id,
+                metadata=doc_metadata.metadata
+            )
+
+            # Check for errors in result
+            if result.get("status") != "success":
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to upload document {file.filename}: {result}"
+                )
+
+            # Create Document response object with correct fields
+            document_response = Document(
+                document_id=document_id,
+                filename=doc_metadata.filename,
+                content_type=doc_metadata.content_type,
+                file_size=doc_metadata.file_size,
+                upload_timestamp=datetime.utcnow(),
+                session_id=session_id,
+                user_id=user_id,
+                status="uploaded"
+            )
+
+            uploaded_documents.append(document_response)
+
+        return uploaded_documents
+
+    except DatabaseConnectionException as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database connection error: {e.message}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload folder documents: {str(e)}"
+        )

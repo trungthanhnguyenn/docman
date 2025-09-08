@@ -241,8 +241,8 @@ class MinioDB(InterfaceDatabase):
                     file_stream = file_data
                     actual_size = file_size
                 
-                # Use document_id as object_name (hash string)
-                object_name = document_id
+                # Use relative_path if available (for folder uploads), otherwise use document_id
+                object_name = point.get('relative_path', document_id)
                 
                 # Prepare metadata with Unicode support
                 raw_metadata = {
