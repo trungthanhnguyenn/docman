@@ -241,17 +241,19 @@ class MinioDB(InterfaceDatabase):
                     file_stream = file_data
                     actual_size = file_size
                 
-                # Use relative_path if available (for folder uploads), otherwise use document_id
-                relative_path = point.get('relative_path')
-                object_name = relative_path if relative_path is not None else document_id
+                # Always use document_id as object_name for consistency
+                # Store relative_path in metadata for folder structure preservation
+                object_name = document_id
                 
-                # Prepare metadata with Unicode support
+                # Prepare metadata with Unicode support including relative_path
+                relative_path = point.get('relative_path')
                 raw_metadata = {
                     'original_filename': normalized_filename,
                     'file_hash': file_hash or '',
                     'upload_time': datetime.utcnow().isoformat(),
                     'file_size': str(actual_size),
-                    'content_type': content_type
+                    'content_type': content_type,
+                    'relative_path': relative_path or ''  # Store relative_path for folder structure
                 }
                 
                 # Create ASCII-safe metadata for MinIO

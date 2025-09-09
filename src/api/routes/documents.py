@@ -14,13 +14,14 @@ from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, Query
 from fastapi.responses import StreamingResponse
 
-from src.core.config import config
+from src.core.config import config, DocumentOut, Indicator
 from src.core.models import (
     Document, DocumentMetadata
 )
 from src.api.services.database_manager import DatabaseManager
 from src.core.exceptions import DatabaseConnectionException
 from src.api.dependencies import get_database_manager
+from src.core.utils import get_documents_content_by_indicators
 
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -666,3 +667,40 @@ async def upload_folder_documents(
             status_code=500,
             detail=f"Failed to upload folder documents: {str(e)}"
         )
+
+@router.post(
+    "/content-by-indicators",
+    response_model=List[DocumentOut],
+    summary="Get text content of documents by (category, index) pairs",
+    description=(
+        "Receive a list of {'category': 'ami', 'index': '1'} objects "
+        "and return their extracted text content."
+    ),
+)
+def get_documents_content_by_indicators_endpoint(
+    session_id: str,
+    indicators: List[Indicator],
+) -> List[DocumentOut]:
+    """
+    Get text content of documents by (category, index) pairs.
+
+    Args:
+        session_id: Session identifier to scope the document search
+        indicators: List of Indicator objects with 'category' and 'index'
+
+    Returns:
+        List[DocumentOut]: List of documents with their text content
+    """
+    # Convert
+    indicators_dict: List[Dict[str, str]] = [i.dict() for i in indicators]
+
+    # Call function
+    results = get_documents_content_by_indicators(session_id, indicators_dict)
+
+    # Error handling
+    if not results or all("not found" in r["content"].lower() for r in results):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="No documents matched the given indicators")
+
+    # Return results
+    return [DocumentOut(**r) for r in results]

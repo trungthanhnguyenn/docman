@@ -3,6 +3,7 @@ import os
 from pydantic_settings import BaseSettings
 from typing import Optional
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -87,6 +88,18 @@ class ApplicationConfig(BaseSettings):
     class Config:
         env_prefix = "APP_"
         case_sensitive = False
+
+class Indicator(BaseModel):
+    category: str = Field(..., description="e.g. ami, bci_1 …")
+    index: str = Field(..., description="e.g. 1, 2 …")
+
+class DocumentOut(BaseModel):
+    category: str
+    content: str
+    document_id: str = None
+    filename: str = None
+    relative_path: str = None
+    file_size: int = None
 
 # Global configuration instance
 config = ApplicationConfig()
