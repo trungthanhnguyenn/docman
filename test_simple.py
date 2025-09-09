@@ -19,7 +19,7 @@ except ImportError:
     print("Warning: python-docx not installed. Install with: pip install python-docx")
     DOCX_AVAILABLE = False
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+API_BASE_URL = os.getenv("API_BASE_URL", "http://0.0.0.0:8000")
 
 def _create_session(user_id: str, expires_in_hours: Optional[int] = 24, metadata: Optional[Dict[str, Any]] = None, temp_collection_name: Optional[str] = None) -> Dict[str, Any]:
     """Create session by user ID
@@ -437,12 +437,12 @@ if __name__ == "__main__":
     print(f"Session ID: {session_id}")
 
     upload = asyncio.run(upload_folder_optimized(session_id, "lumir_data"))
-    print(f"Upload results: {upload}")
+    # print(f"Upload results: {upload}")
 
     # Original test (commented out for now)
     dict_test = get_documents_content_by_indicators(session_id, [
         {"category": "tai", "index": "1"},
-        {"category": "ssi", "index": "1"},
+        {"category": "ssi", "index": "3"},
         {"category": "ri", "index": "1"},
         {"category": "ami", "index": "2"},
     ])  # Should retrieve documents by category and index

@@ -3,7 +3,7 @@
 echo "Testing download-by-key endpoint..."
 
 curl -X 'POST' \
-  'http://localhost:8000/api/v1/documents/download-by-key/{your_session_id_here}' \
+  'http://0.0.0.0:8000/api/v1/documents/content-by-indicators?session_id={session_id}' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -d '[
