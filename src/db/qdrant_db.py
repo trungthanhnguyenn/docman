@@ -2,8 +2,16 @@ import os
 import logging
 import json
 import uuid
+import zipfile
 from datetime import datetime
 from typing import Optional, List, Any, Dict, Union
+
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+    requests = None
 
 try:
     from qdrant_client.http import models
@@ -747,4 +755,387 @@ class QdrantChunksDB(InterfaceDatabase):
             return {
                 'status': 'failed',
                 'message': f"Error getting collection info: {str(e)}"
+            }
+
+    def list_collections(self) -> dict:
+        """
+        List all available collections.
+        
+        Returns:
+            dict: List of collections
+        """
+        if not self._check_client():
+            return {
+                'status': 'failed',
+                'message': 'Qdrant client not connected',
+                'collections': []
+            }
+        
+        try:
+            collections = self._client.get_collections()
+            collection_names = [collection.name for collection in collections.collections]
+            return {
+                'status': 'success',
+                'collections': collection_names,
+                'total_collections': len(collection_names)
+            }
+        except Exception as e:
+            return {
+                'status': 'failed',
+                'message': f"Error listing collections: {str(e)}",
+                'collections': []
+            }
+
+    def backup_collection(self, collection_name: str, output_dir: str = "backups") -> dict:
+        """
+        Create a snapshot backup of a collection using Qdrant's native snapshot API.
+        
+        Args:
+            collection_name: Name of collection to backup
+            output_dir: Directory to save backup files
+            
+        Returns:
+            dict: Backup result with snapshot info
+        """
+        import time
+        start_time = time.time()
+        
+        if not self._check_client():
+            return {
+                'status': 'failed',
+                'message': 'Qdrant client not connected',
+                'processing_time_ms': 0
+            }
+        
+        try:
+            # Create output directory if it doesn't exist
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Create snapshot using Qdrant's API
+            snapshot_result = self._client.create_snapshot(collection_name=collection_name)
+            
+            if not snapshot_result:
+                return {
+                    'status': 'failed',
+                    'message': f'Failed to create snapshot for collection {collection_name}',
+                    'processing_time_ms': int((time.time() - start_time) * 1000)
+                }
+            
+            # Download the snapshot
+            snapshot_url = f"{self._client._client.rest_uri}/collections/{collection_name}/snapshots/{snapshot_result.name}"
+            
+            # Use requests to download if available, otherwise try client download
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            backup_filename = f"{collection_name}_snapshot_{timestamp}.tar"
+            backup_filepath = os.path.join(output_dir, backup_filename)
+            
+            if REQUESTS_AVAILABLE and requests:
+                try:
+                    # Download using requests
+                    headers = {}
+                    if hasattr(self._client, '_client') and hasattr(self._client._client, 'api_key'):
+                        api_key = self._client._client.api_key
+                        if api_key:
+                            headers['api-key'] = api_key
+                    
+                    response = requests.get(snapshot_url, headers=headers, stream=True)
+                    response.raise_for_status()
+                    
+                    with open(backup_filepath, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    
+                    logging.info(f"Snapshot downloaded successfully to {backup_filepath}")
+                    
+                except Exception as download_error:
+                    logging.warning(f"Failed to download snapshot via requests: {download_error}")
+                    # Fallback: keep snapshot on server
+                    backup_filepath = f"server://{collection_name}/snapshots/{snapshot_result.name}"
+            else:
+                # No requests available, keep snapshot on server
+                backup_filepath = f"server://{collection_name}/snapshots/{snapshot_result.name}"
+                logging.info(f"Snapshot created on server: {snapshot_result.name}")
+            
+            processing_time = int((time.time() - start_time) * 1000)
+            
+            return {
+                'status': 'success',
+                'message': f'Snapshot backup completed for collection {collection_name}',
+                'backup_file': backup_filepath,
+                'snapshot_name': snapshot_result.name,
+                'snapshot_size': getattr(snapshot_result, 'size', 'unknown'),
+                'processing_time_ms': processing_time
+            }
+            
+        except Exception as e:
+            return {
+                'status': 'failed',
+                'message': f'Error creating snapshot for collection {collection_name}: {str(e)}',
+                'processing_time_ms': int((time.time() - start_time) * 1000)
+            }
+
+    def backup_multiple_collections(self, collection_names: List[str], output_dir: str = "backups") -> dict:
+        """
+        Create snapshots for multiple collections.
+        
+        Args:
+            collection_names: List of collection names to backup
+            output_dir: Directory to save backup files
+            
+        Returns:
+            dict: Backup results for all collections
+        """
+        import time
+        start_time = time.time()
+        
+        backup_results = []
+        successful_backups = []
+        failed_backups = []
+        
+        for collection_name in collection_names:
+            result = self.backup_collection(collection_name, output_dir)
+            backup_results.append({
+                'collection_name': collection_name,
+                'result': result
+            })
+            
+            if result['status'] == 'success':
+                successful_backups.append({
+                    'collection_name': collection_name,
+                    'backup_file': result['backup_file'],
+                    'snapshot_name': result.get('snapshot_name')
+                })
+            else:
+                failed_backups.append({
+                    'collection_name': collection_name,
+                    'error': result['message']
+                })
+        
+        processing_time = int((time.time() - start_time) * 1000)
+        
+        return {
+            'status': 'success' if not failed_backups else 'partial',
+            'backup_results': backup_results,
+            'successful_backups': successful_backups,
+            'failed_backups': failed_backups,
+            'total_collections': len(collection_names),
+            'successful_count': len(successful_backups),
+            'failed_count': len(failed_backups),
+            'processing_time_ms': processing_time
+        }
+
+    def restore_collection(self, backup_path: str, new_collection_name: Optional[str] = None) -> dict:
+        """
+        Restore a collection from Qdrant snapshot backup.
+        
+        Args:
+            backup_path: Path to snapshot file (.tar) or server snapshot reference
+            new_collection_name: Optional new name for restored collection
+            
+        Returns:
+            dict: Restore result
+        """
+        import time
+        start_time = time.time()
+        
+        if not self._check_client():
+            return {
+                'status': 'failed',
+                'message': 'Qdrant client not connected',
+                'processing_time_ms': 0
+            }
+        
+        try:
+            # Check if it's a server snapshot reference or local file
+            if backup_path.startswith("server://"):
+                # Server snapshot format: server://collection_name/snapshots/snapshot_name
+                parts = backup_path.replace("server://", "").split("/")
+                if len(parts) >= 3 and parts[1] == "snapshots":
+                    original_collection = parts[0]
+                    snapshot_name = parts[2]
+                    
+                    # Use server-side snapshot
+                    collection_name = new_collection_name or original_collection
+                    
+                    # Restore from server snapshot
+                    self._client.recover_snapshot(
+                        collection_name=collection_name,
+                        snapshot_path=f"/snapshots/{snapshot_name}"
+                    )
+                    
+                    processing_time = int((time.time() - start_time) * 1000)
+                    
+                    return {
+                        'status': 'success',
+                        'message': f'Restored collection {collection_name} from server snapshot',
+                        'collection_name': collection_name,
+                        'snapshot_name': snapshot_name,
+                        'processing_time_ms': processing_time
+                    }
+                else:
+                    return {
+                        'status': 'failed',
+                        'message': 'Invalid server snapshot reference format',
+                        'processing_time_ms': int((time.time() - start_time) * 1000)
+                    }
+            else:
+                # Local snapshot file
+                if not os.path.exists(backup_path):
+                    return {
+                        'status': 'failed',
+                        'message': f'Backup file not found: {backup_path}',
+                        'processing_time_ms': int((time.time() - start_time) * 1000)
+                    }
+                
+                # Extract collection name from filename if not provided
+                if new_collection_name is None:
+                    filename = os.path.basename(backup_path)
+                    # Expected format: collection_name_snapshot_timestamp.tar
+                    if "_snapshot_" in filename:
+                        new_collection_name = filename.split("_snapshot_")[0]
+                    else:
+                        return {
+                            'status': 'failed',
+                            'message': 'Cannot determine collection name from filename. Please provide new_collection_name.',
+                            'processing_time_ms': int((time.time() - start_time) * 1000)
+                        }
+                
+                # Upload and restore from local snapshot
+                try:
+                    # For local files, we need to upload the snapshot first
+                    # This is a more complex operation that may require REST API calls
+                    
+                    # Check if collection already exists
+                    existing_collections = self.list_collections()
+                    if (existing_collections['status'] == 'success' and 
+                        new_collection_name in existing_collections['collections']):
+                        
+                        # Delete existing collection
+                        delete_result = self.delete_collection(new_collection_name)
+                        if delete_result['status'] != 'success':
+                            logging.warning(f"Failed to delete existing collection: {delete_result['message']}")
+                    
+                    # Use REST API to upload and restore snapshot
+                    if REQUESTS_AVAILABLE and requests:
+                        base_url = self._client._client.rest_uri
+                        
+                        # Prepare headers
+                        headers = {}
+                        if hasattr(self._client, '_client') and hasattr(self._client._client, 'api_key'):
+                            api_key = self._client._client.api_key
+                            if api_key:
+                                headers['api-key'] = api_key
+                        
+                        # Upload snapshot
+                        upload_url = f"{base_url}/collections/{new_collection_name}/snapshots/upload"
+                        
+                        with open(backup_path, 'rb') as f:
+                            files = {'snapshot': f}
+                            response = requests.post(upload_url, headers=headers, files=files)
+                            response.raise_for_status()
+                        
+                        processing_time = int((time.time() - start_time) * 1000)
+                        
+                        return {
+                            'status': 'success',
+                            'message': f'Restored collection {new_collection_name} from snapshot',
+                            'collection_name': new_collection_name,
+                            'backup_file': backup_path,
+                            'processing_time_ms': processing_time
+                        }
+                    else:
+                        return {
+                            'status': 'failed',
+                            'message': 'requests library not available for snapshot upload',
+                            'processing_time_ms': int((time.time() - start_time) * 1000)
+                        }
+                        
+                except Exception as upload_error:
+                    return {
+                        'status': 'failed',
+                        'message': f'Error uploading/restoring snapshot: {str(upload_error)}',
+                        'processing_time_ms': int((time.time() - start_time) * 1000)
+                    }
+            
+        except Exception as e:
+            return {
+                'status': 'failed',
+                'message': f'Error restoring collection: {str(e)}',
+                'processing_time_ms': int((time.time() - start_time) * 1000)
+            }
+    
+    def list_snapshots(self, collection_name: str) -> dict:
+        """
+        List all snapshots for a collection.
+        
+        Args:
+            collection_name: Name of collection to list snapshots for
+            
+        Returns:
+            dict: List of snapshots
+        """
+        if not self._check_client():
+            return {
+                'status': 'failed',
+                'message': 'Qdrant client not connected',
+                'snapshots': []
+            }
+        
+        try:
+            snapshots = self._client.list_snapshots(collection_name=collection_name)
+            
+            snapshot_list = []
+            for snapshot in snapshots:
+                snapshot_list.append({
+                    'name': snapshot.name,
+                    'size': getattr(snapshot, 'size', 'unknown'),
+                    'creation_time': getattr(snapshot, 'creation_time', 'unknown')
+                })
+            
+            return {
+                'status': 'success',
+                'collection_name': collection_name,
+                'snapshots': snapshot_list,
+                'total_snapshots': len(snapshot_list)
+            }
+            
+        except Exception as e:
+            return {
+                'status': 'failed',
+                'message': f'Error listing snapshots for {collection_name}: {str(e)}',
+                'snapshots': []
+            }
+
+    def delete_snapshot(self, collection_name: str, snapshot_name: str) -> dict:
+        """
+        Delete a specific snapshot.
+        
+        Args:
+            collection_name: Name of collection
+            snapshot_name: Name of snapshot to delete
+            
+        Returns:
+            dict: Deletion result
+        """
+        if not self._check_client():
+            return {
+                'status': 'failed',
+                'message': 'Qdrant client not connected'
+            }
+        
+        try:
+            self._client.delete_snapshot(
+                collection_name=collection_name,
+                snapshot_name=snapshot_name
+            )
+            
+            return {
+                'status': 'success',
+                'message': f'Snapshot {snapshot_name} deleted from collection {collection_name}'
+            }
+            
+        except Exception as e:
+            return {
+                'status': 'failed',
+                'message': f'Error deleting snapshot {snapshot_name}: {str(e)}'
             }

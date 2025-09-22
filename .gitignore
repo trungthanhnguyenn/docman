@@ -208,7 +208,7 @@ __marimo__/
     
 # data
 lumir_data/
-
+backups/
 tests/
 
 .DS_Store
