@@ -319,3 +319,168 @@ class PaginatedResponse(BaseModel):
     data: List[Any] = Field(..., description="Response data")
     pagination: PaginationInfo = Field(..., description="Pagination information")
     processing_time_ms: int = Field(..., ge=0, description="Processing time in milliseconds")
+
+
+# =============================================
+# RAG PIPELINE MODELS
+# =============================================
+
+class EmbeddingRequest(BaseModel):
+    """Request for server-side embedding generation"""
+    texts: List[str] = Field(..., description="Texts to embed")
+    model: Optional[str] = Field(None, description="Embedding model to use (default: Qwen3-0.6B)")
+    
+    @validator('texts')
+    def validate_texts(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError('At least one text is required')
+        # Filter empty strings
+        v = [t.strip() for t in v if t and t.strip()]
+        if not v:
+            raise ValueError('All texts are empty after stripping')
+        return v
+
+
+class EmbeddingResponse(BaseModel):
+    """Response from embedding generation"""
+    embeddings: List[List[float]] = Field(..., description="Generated embedding vectors")
+    model: str = Field(..., description="Model used for embeddings")
+    dimension: int = Field(..., description="Embedding dimension")
+    processing_time_ms: int = Field(..., ge=0, description="Processing time in milliseconds")
+
+
+class ChunkUploadWithEmbeddingRequest(BaseModel):
+    """Chunk upload request with optional server-side embedding"""
+    chunks: List[Dict[str, Any]] = Field(..., description="Chunks with text content")
+    session_id: str = Field(..., description="Session identifier")
+    collection_name: Optional[str] = Field(None, description="Optional collection name")
+    generate_embeddings: bool = Field(True, description="Generate embeddings server-side")
+    embedding_model: Optional[str] = Field(None, description="Embedding model (default: Qwen3-0.6B)")
+
+
+class RerankSearchRequest(BaseModel):
+    """Search request with reranking support"""
+    query_text: str = Field(..., description="Search query text")
+    query_vector: Optional[List[float]] = Field(None, description="Pre-computed query vector (generated if not provided)")
+    limit: int = Field(10, ge=1, le=100, description="Number of initial results to retrieve")
+    rerank: bool = Field(True, description="Apply reranking to results")
+    rerank_top_k: Optional[int] = Field(None, description="Number of results after reranking (default: limit)")
+    filters: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Search filters")
+    collection_name: Optional[str] = Field(None, description="Collection to search")
+    session_id: Optional[str] = Field(None, description="Session context")
+
+
+class RerankSearchResult(BaseModel):
+    """Search result with reranking scores"""
+    chunk_id: str = Field(..., description="Chunk identifier")
+    document_id: str = Field(..., description="Document identifier")
+    document_title: str = Field(..., description="Document title")
+    chunk_text: str = Field(..., description="Chunk content")
+    original_score: float = Field(..., ge=0.0, le=1.0, description="Original vector similarity score")
+    rerank_score: Optional[float] = Field(None, ge=0.0, le=1.0, description="Cross-encoder rerank score")
+    combined_score: float = Field(..., ge=0.0, le=1.0, description="Final combined score")
+    source: str = Field(..., description="Source collection")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+
+
+class RerankSearchResponse(BaseModel):
+    """Response from reranked search"""
+    query_text: str = Field(..., description="Original query text")
+    results: List[RerankSearchResult] = Field(..., description="Reranked search results")
+    total_results: int = Field(..., ge=0, description="Total results found")
+    reranked: bool = Field(..., description="Whether reranking was applied")
+    search_time_ms: int = Field(..., ge=0, description="Vector search time")
+    rerank_time_ms: int = Field(0, ge=0, description="Reranking time")
+    total_time_ms: int = Field(..., ge=0, description="Total processing time")
+    model_info: Dict[str, str] = Field(default_factory=dict, description="Models used (embedding, reranking)")
+
+
+class RAGQueryRequest(BaseModel):
+    """Full RAG pipeline query request"""
+    query: str = Field(..., description="User query")
+    session_id: Optional[str] = Field(None, description="Session context")
+    collection_name: Optional[str] = Field(None, description="Collection to search")
+    top_k: int = Field(10, ge=1, le=50, description="Number of chunks to retrieve")
+    rerank: bool = Field(True, description="Apply reranking")
+    score_threshold: float = Field(0.3, ge=0.0, le=1.0, description="Minimum similarity threshold")
+    include_metadata: bool = Field(True, description="Include full metadata in response")
+
+
+class RAGQueryResponse(BaseModel):
+    """Full RAG pipeline query response"""
+    query: str = Field(..., description="Original query")
+    results: List[RerankSearchResult] = Field(..., description="Retrieved and reranked results")
+    total_found: int = Field(..., ge=0, description="Total results found")
+    processing_time_ms: int = Field(..., ge=0, description="Total processing time")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Pipeline metadata and metrics")
+
+
+# =============================================
+# HEALTH & MONITORING MODELS
+# =============================================
+
+# =============================================
+# CHUNKING V2 MODELS
+# =============================================
+
+class ChunkingRequest(BaseModel):
+    """Request model for document chunking v2"""
+    content: str = Field(..., description="Document content to chunk")
+    chunk_mode: str = Field(
+        "auto",
+        description="Chunking strategy: auto, header_based, qa_based, semantic, size_based, advanced_semantic"
+    )
+    filename: Optional[str] = Field(None, description="Optional filename for context")
+    document_id: Optional[str] = Field(None, description="Optional document ID")
+    chunk_size: Optional[int] = Field(1000, ge=100, le=5000, description="Chunk size in characters")
+    chunk_overlap: Optional[int] = Field(200, ge=0, le=1000, description="Chunk overlap in characters")
+    min_chunk_size: Optional[int] = Field(50, ge=10, le=500, description="Minimum chunk size")
+    
+    @validator('chunk_mode')
+    def validate_chunk_mode(cls, v):
+        allowed_modes = ["auto", "header_based", "qa_based", "semantic", "size_based", "advanced_semantic"]
+        if v not in allowed_modes:
+            raise ValueError(f'chunk_mode must be one of: {", ".join(allowed_modes)}')
+        return v
+    
+    @validator('content')
+    def validate_content(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Content cannot be empty')
+        return v
+
+
+class ChunkV2(BaseModel):
+    """Individual chunk result from v2 chunking"""
+    content: str = Field(..., description="Chunk text content")
+    chunk_index: int = Field(..., ge=0, description="Chunk index in document")
+    start_char: int = Field(..., ge=0, description="Start character position")
+    end_char: int = Field(..., ge=0, description="End character position")
+    chunk_type: str = Field(..., description="Chunk type (header, content, qa_pair, etc.)")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Chunk metadata")
+    token_count: int = Field(..., ge=0, description="Estimated token count")
+    language: str = Field("vi", description="Detected language")
+
+
+class ChunkingV2Response(BaseModel):
+    """Response model for document chunking v2"""
+    chunks: List[ChunkV2] = Field(..., description="List of generated chunks")
+    total_chunks: int = Field(..., ge=0, description="Total number of chunks")
+    strategy_used: str = Field(..., description="Chunking strategy that was used")
+    processing_time_ms: int = Field(..., ge=0, description="Processing time in milliseconds")
+    document_metadata: Dict[str, Any] = Field(default_factory=dict, description="Document analysis metadata")
+
+
+class DocumentChunkingRequest(BaseModel):
+    """Request model for chunking a document by ID"""
+    document_id: str = Field(..., description="Document ID to chunk")
+    chunk_mode: str = Field("auto", description="Chunking strategy")
+    chunk_size: Optional[int] = Field(1000, ge=100, le=5000, description="Chunk size")
+    chunk_overlap: Optional[int] = Field(200, ge=0, le=1000, description="Chunk overlap")
+    
+    @validator('chunk_mode')
+    def validate_chunk_mode(cls, v):
+        allowed_modes = ["auto", "header_based", "qa_based", "semantic", "size_based", "advanced_semantic"]
+        if v not in allowed_modes:
+            raise ValueError(f'chunk_mode must be one of: {", ".join(allowed_modes)}')
+        return v

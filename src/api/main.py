@@ -23,9 +23,13 @@ from src.api.routes import (
     documents,
     health,
     sessions,
-    chunks
+    chunks,
+    rag,
+    chunking_v2
 )
 from src.api.services.database_manager import DatabaseManager
+from src.api.services.model_lifecycle import get_model_lifecycle_manager
+from src.api.services.embedding_service import cleanup_embedding_service
 
 # Configure logging
 logging.basicConfig(
@@ -65,6 +69,17 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("🛑 Shutting down Document Management System API")
     
+    # Cleanup ML models first to prevent semaphore leaks
+    logger.info("🧹 Cleaning up ML models...")
+    try:
+        cleanup_embedding_service()
+        lifecycle_manager = get_model_lifecycle_manager()
+        lifecycle_manager.cleanup_all()
+        logger.info("✅ ML models cleaned up successfully")
+    except Exception as e:
+        logger.error(f"❌ ML models cleanup error: {e}")
+    
+    # Cleanup databases
     if db_manager:
         await db_manager.cleanup()
         logger.info("✅ Database connections closed successfully")
@@ -155,10 +170,12 @@ async def general_exception_handler(request: Request, exc: Exception):
     )
 
 # Include routers - focusing on core features only
-app.include_router(documents.router, prefix="/api/v1", tags=["documents"])
-app.include_router(chunks.router, prefix="/api/v1", tags=["chunks"])
-app.include_router(sessions.router, prefix="/api/v1", tags=["sessions"])
-app.include_router(health.router, prefix="/api/v1", tags=["health"])
+app.include_router(health.router, prefix="/api/v1")
+app.include_router(sessions.router, prefix="/api/v1")
+app.include_router(documents.router, prefix="/api/v1")
+app.include_router(chunks.router, prefix="/api/v1")
+app.include_router(rag.router, prefix="/api/v1")
+app.include_router(chunking_v2.router, prefix="/api/v1")  # New chunking v2 routes
 
 # Root endpoint
 @app.get("/")
@@ -188,7 +205,10 @@ async def api_info():
             "document_management": True,
             "chunks_management": True,
             "health_monitoring": True,
-            "metrics_collection": True
+            "metrics_collection": True,
+            "rag_pipeline": True,
+            "server_side_embedding": True,
+            "reranking": True
         },
         "limits": {
             "max_file_size_mb": config.minio.max_file_size // (1024 * 1024),

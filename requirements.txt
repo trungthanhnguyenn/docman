@@ -24,8 +24,19 @@ passlib[bcrypt]==1.7.4
 celery==5.3.4
 redis==5.0.1
 
+<<<<<<< Updated upstream
 # Added
 urllib3
 aiohttp
 requests
 python-docx
+=======
+# === RAG Pipeline Dependencies ===
+# Embedding & Reranking
+sentence-transformers==3.2.1
+transformers>=4.51.0
+torch==2.2.2
+tokenizers>=0.21.0
+langchain-huggingface>=0.1.2
+python-dotenv==1.0.1
+>>>>>>> Stashed changes

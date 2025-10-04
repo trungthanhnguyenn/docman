@@ -5,8 +5,12 @@ Supports the 4 core features:
 2. Document management integration
 3. Chunks CRUD operations
 4. Metrics and logging
+
+Extended with RAG pipeline features:
+- Server-side embedding generation
+- Reranking support (via /rag endpoints)
 """
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -16,6 +20,7 @@ from src.core.models import (
     ChunkOperationResponse, SearchRequest, SearchResponse, SearchResult, ChunkBatchUpdateRequest
 )
 from src.api.services.database_manager import DatabaseManager
+from src.api.services.embedding_service import get_embedding_service
 from src.core.exceptions import DatabaseConnectionException
 from src.api.dependencies import get_database_manager
 
@@ -367,4 +372,139 @@ async def delete_chunks(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to delete chunks: {str(e)}"
+        )
+
+
+@router.post("/session/{session_id}/chunks/with-embedding", response_model=ChunkUploadResponse)
+async def upload_chunks_with_embedding(
+    session_id: str,
+    chunks_data: List[Dict[str, Any]],
+    collection_name: Optional[str] = None,
+    generate_embeddings: bool = True,
+    embedding_model: Optional[str] = None,
+    db_manager: DatabaseManager = Depends(get_database_manager)
+) -> ChunkUploadResponse:
+    """
+    Upload chunks with optional server-side embedding generation.
+    
+    New endpoint that supports:
+    - Server-side embedding generation (default: Qwen3-0.6B)
+    - Pre-computed embeddings (if generate_embeddings=False)
+    - Custom embedding model selection
+    
+    Args:
+        session_id: Session identifier
+        chunks_data: List of chunks with text content and metadata
+        collection_name: Optional collection name
+        generate_embeddings: Generate embeddings server-side (default: True)
+        embedding_model: Embedding model to use (default: Qwen3-0.6B)
+        db_manager: Database manager instance
+        
+    Returns:
+        ChunkUploadResponse: Upload result with processing details
+        
+    Raises:
+        HTTPException: If upload fails
+    """
+    try:
+        start_time = datetime.utcnow()
+        
+        if not chunks_data:
+            raise HTTPException(status_code=400, detail="No chunks provided")
+        
+        # Prepare chunks
+        prepared_chunks = []
+        
+        if generate_embeddings:
+            # Generate embeddings server-side
+            embedding_service = get_embedding_service(model_name=embedding_model)
+            
+            # Extract texts for batch embedding
+            texts = []
+            for chunk in chunks_data:
+                text = chunk.get("chunk_text") or chunk.get("text") or chunk.get("content")
+                if not text:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Chunk missing text content: {chunk.get('chunk_id', 'unknown')}"
+                    )
+                texts.append(text)
+            
+            # Batch generate embeddings
+            embeddings = embedding_service.embed_texts(texts)
+            
+            # Prepare chunks with generated embeddings
+            for chunk, embedding in zip(chunks_data, embeddings):
+                chunk_data = {
+                    "vector": embedding,
+                    "payload": {
+                        "document_id": chunk.get("document_id", ""),
+                        "doc_title": chunk.get("document_title", ""),
+                        "page": chunk.get("page_number", 0),
+                        "chunk_content": chunk.get("chunk_text") or chunk.get("text"),
+                        "file_url": f"session/{session_id}/document/{chunk.get('document_id', '')}",
+                        "user_id": None,
+                        "session_id": session_id,
+                        **(chunk.get("metadata", {}))
+                    }
+                }
+                prepared_chunks.append(chunk_data)
+        else:
+            # Use pre-computed embeddings
+            for chunk in chunks_data:
+                if "vector" not in chunk and "embedding" not in chunk:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Chunk missing vector/embedding: {chunk.get('chunk_id', 'unknown')}"
+                    )
+                
+                chunk_data = {
+                    "vector": chunk.get("vector") or chunk.get("embedding"),
+                    "payload": {
+                        "document_id": chunk.get("document_id", ""),
+                        "doc_title": chunk.get("document_title", ""),
+                        "page": chunk.get("page_number", 0),
+                        "chunk_content": chunk.get("chunk_text") or chunk.get("text"),
+                        "file_url": f"session/{session_id}/document/{chunk.get('document_id', '')}",
+                        "user_id": None,
+                        "session_id": session_id,
+                        **(chunk.get("metadata", {}))
+                    }
+                }
+                prepared_chunks.append(chunk_data)
+        
+        # Store chunks using database manager
+        result = await db_manager.create_chunks(
+            chunks=prepared_chunks,
+            collection_name=collection_name
+        )
+        
+        processing_time = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        
+        if result.get("status") == "success":
+            return ChunkUploadResponse(
+                status="success",
+                chunks_processed=result.get("points_processed", 0),
+                processing_time_ms=processing_time,
+                failed_chunks=result.get("failed_points")
+            )
+        else:
+            return ChunkUploadResponse(
+                status="partial_failure",
+                chunks_processed=result.get("points_processed", 0),
+                processing_time_ms=processing_time,
+                failed_chunks=result.get("failed_points", [{"error": result.get("message", "Unknown error")}])
+            )
+        
+    except HTTPException:
+        raise
+    except DatabaseConnectionException as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database connection error: {e.message}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload chunks: {str(e)}"
         )
