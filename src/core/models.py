@@ -484,3 +484,89 @@ class DocumentChunkingRequest(BaseModel):
         if v not in allowed_modes:
             raise ValueError(f'chunk_mode must be one of: {", ".join(allowed_modes)}')
         return v
+
+
+# =============================================
+# DIRECT UPSERT MODELS
+# =============================================
+
+class VectorPoint(BaseModel):
+    """Single vector point for upsert"""
+    id: Optional[str] = Field(None, description="Point ID (auto-generated if not provided)")
+    vector: List[float] = Field(..., description="Embedding vector")
+    payload: Dict[str, Any] = Field(..., description="Point payload/metadata")
+    
+    @validator('vector')
+    def validate_vector(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError('Vector cannot be empty')
+        if not all(isinstance(x, (int, float)) for x in v):
+            raise ValueError('Vector must contain only numeric values')
+        return v
+    
+    @validator('payload')
+    def validate_payload(cls, v):
+        if not v:
+            raise ValueError('Payload cannot be empty')
+        # Ensure basic required fields
+        if 'chunk_content' not in v and 'content' not in v and 'text' not in v:
+            raise ValueError('Payload must contain at least one of: chunk_content, content, or text')
+        return v
+
+
+class DirectUpsertRequest(BaseModel):
+    """Direct upsert request to Qdrant (no embedding generation)"""
+    points: List[VectorPoint] = Field(..., description="List of vector points to upsert")
+    collection_name: Optional[str] = Field(None, description="Target collection name (default: document_chunks)")
+    vector_size: Optional[int] = Field(None, description="Vector dimension (for collection creation if needed)")
+    distance_metric: Optional[str] = Field("cosine", description="Distance metric: cosine, euclidean, dot")
+    create_collection: bool = Field(False, description="Create collection if not exists")
+    batch_size: int = Field(100, ge=1, le=1000, description="Batch size for upsert operations")
+    
+    @validator('points')
+    def validate_points(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError('At least one point is required')
+        return v
+    
+    @validator('distance_metric')
+    def validate_distance_metric(cls, v):
+        allowed = ['cosine', 'euclidean', 'dot', 'manhattan']
+        if v.lower() not in allowed:
+            raise ValueError(f'Distance metric must be one of: {", ".join(allowed)}')
+        return v.lower()
+
+
+class DirectUpsertResponse(BaseModel):
+    """Response from direct upsert operation"""
+    status: str = Field(..., description="Operation status: success, partial_failure, error")
+    points_processed: int = Field(..., ge=0, description="Number of points successfully upserted")
+    points_failed: int = Field(0, ge=0, description="Number of points that failed")
+    collection_name: str = Field(..., description="Target collection name")
+    vector_dimension: Optional[int] = Field(None, description="Vector dimension used")
+    processing_time_ms: int = Field(..., ge=0, description="Total processing time")
+    failed_points: Optional[List[Dict[str, Any]]] = Field(None, description="Details of failed points")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional operation metadata")
+
+
+class BatchUpsertRequest(BaseModel):
+    """Batch upsert with flexible vector sizes per collection"""
+    batches: List[Dict[str, Any]] = Field(..., description="List of batch operations")
+    
+    class BatchOperation(BaseModel):
+        """Single batch operation"""
+        collection_name: str = Field(..., description="Target collection")
+        points: List[VectorPoint] = Field(..., description="Points to upsert")
+        vector_size: Optional[int] = Field(None, description="Vector dimension")
+        create_if_missing: bool = Field(False, description="Create collection if not exists")
+    
+    @validator('batches')
+    def validate_batches(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError('At least one batch is required')
+        return v
+
+
+# =============================================
+# HEALTH & MONITORING MODELS
+# =============================================

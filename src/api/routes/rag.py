@@ -10,7 +10,6 @@ Adapted from lumir-agentic RAG system.
 """
 
 import logging
-from typing import Dict, Any
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -20,7 +19,7 @@ from src.core.models import (
     EmbeddingRequest, EmbeddingResponse,
     RerankSearchRequest, RerankSearchResponse, RerankSearchResult,
     RAGQueryRequest, RAGQueryResponse,
-    SearchResult
+    DirectUpsertRequest, DirectUpsertResponse
 )
 from src.api.services.database_manager import DatabaseManager
 from src.api.services.embedding_service import get_embedding_service
@@ -69,7 +68,7 @@ async def generate_embeddings(request: EmbeddingRequest) -> EmbeddingResponse:
         return EmbeddingResponse(
             embeddings=embeddings,
             model=embedding_service.model_name,
-            dimension=embedding_service.embedding_dimension,
+            dimension=embedding_service.embedding_dimension or 1024,  # Default to 1024 if None
             processing_time_ms=processing_time
         )
         
@@ -155,7 +154,6 @@ async def rerank_search(
         reranked = False
         
         if request.rerank and search_results:
-            rerank_start = datetime.utcnow()
             reranking_service = get_reranking_service()
             
             rerank_top_k = request.rerank_top_k or request.limit
@@ -264,6 +262,7 @@ async def rag_query(
         # Convert to rerank search request
         rerank_request = RerankSearchRequest(
             query_text=request.query,
+            query_vector=None,  # Will be generated in rerank_search
             limit=request.top_k,
             rerank=request.rerank,
             rerank_top_k=request.top_k,
@@ -307,4 +306,146 @@ async def rag_query(
         raise HTTPException(
             status_code=500,
             detail=f"RAG query failed: {str(e)}"
+        )
+
+
+@router.post("/vectors/upsert", response_model=DirectUpsertResponse)
+async def direct_vector_upsert(
+    request: DirectUpsertRequest,
+    db_manager: DatabaseManager = Depends(get_database_manager)
+) -> DirectUpsertResponse:
+    """
+    Direct upsert of embedding vectors into Qdrant (without embedding generation).
+    
+    This endpoint allows direct insertion of pre-computed embedding vectors into Qdrant.
+    Use cases:
+    - Custom embedding models not available in server
+    - Batch upload of pre-computed embeddings
+    - Migration of vectors from other systems
+    - Integration with external embedding services
+    
+    Args:
+        request: Direct upsert request with vectors and metadata
+        db_manager: Database manager instance
+        
+    Returns:
+        DirectUpsertResponse: Upsert operation results
+        
+    Raises:
+        HTTPException: If upsert operation fails
+        
+    Example:
+        ```python
+        POST /api/v1/rag/vectors/upsert
+        {
+          "points": [
+            {
+              "id": "custom-id-1",  # Optional
+              "vector": [0.1, 0.2, ..., 0.9],  # 1024-dim for Qwen3
+              "payload": {
+                "chunk_content": "Text content...",
+                "document_id": "doc-001",
+                "session_id": "session-123",
+                "metadata": {...}
+              }
+            }
+          ],
+          "collection_name": "custom_collection",
+          "vector_size": 1024,
+          "distance_metric": "cosine",
+          "create_collection": true
+        }
+        ```
+    """
+    try:
+        start_time = datetime.utcnow()
+        
+        # Get target collection
+        collection_name = request.collection_name or config.qdrant.default_collection_name
+        
+        # Check if collection exists or create if requested
+        if request.create_collection and request.vector_size:
+            try:
+                # Try to create collection (idempotent if already exists)
+                if db_manager.qdrant_client:
+                    success = db_manager.qdrant_client.create_collection(
+                        collection_name=collection_name,
+                        dimension=request.vector_size,
+                        distance=request.distance_metric or "cosine"
+                    )
+                    if success:
+                        logger.info(f"Collection {collection_name} created/verified (dim={request.vector_size})")
+            except Exception as e:
+                logger.warning(f"Collection creation warning: {e}")
+        
+        # Validate vector dimensions
+        vector_dim = None
+        for point in request.points:
+            if vector_dim is None:
+                vector_dim = len(point.vector)
+            elif len(point.vector) != vector_dim:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Inconsistent vector dimensions: expected {vector_dim}, got {len(point.vector)}"
+                )
+        
+        # Prepare chunks for database manager
+        chunks_data = []
+        for point in request.points:
+            chunk_data = {
+                "id": point.id,  # Can be None (auto-generated)
+                "vector": point.vector,
+                "payload": point.payload
+            }
+            chunks_data.append(chunk_data)
+        
+        # Batch upsert using database manager
+        logger.info(f"Upserting {len(chunks_data)} points to {collection_name} (dim={vector_dim})")
+        
+        # Use database manager's create_chunks method
+        result = await db_manager.create_chunks(
+            chunks=chunks_data,
+            collection_name=collection_name
+        )
+        
+        processing_time = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        
+        # Prepare response
+        if result.get("status") == "success":
+            return DirectUpsertResponse(
+                status="success",
+                points_processed=result.get("points_processed", len(request.points)),
+                points_failed=len(result.get("failed_points", [])),
+                collection_name=collection_name,
+                vector_dimension=vector_dim,
+                processing_time_ms=processing_time,
+                failed_points=result.get("failed_points"),
+                metadata={
+                    "batch_size": request.batch_size,
+                    "distance_metric": request.distance_metric,
+                    "collection_created": request.create_collection
+                }
+            )
+        else:
+            return DirectUpsertResponse(
+                status="partial_failure",
+                points_processed=result.get("points_processed", 0),
+                points_failed=len(request.points) - result.get("points_processed", 0),
+                collection_name=collection_name,
+                vector_dimension=vector_dim,
+                processing_time_ms=processing_time,
+                failed_points=result.get("failed_points", []),
+                metadata={
+                    "error": result.get("message", "Unknown error"),
+                    "batch_size": request.batch_size
+                }
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Direct upsert failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Direct upsert failed: {str(e)}"
         )
