@@ -7,6 +7,7 @@ A comprehensive document management system built with FastAPI that provides docu
 - **Document Upload & Processing**: Upload documents with automatic chunking and metadata extraction
 - **Session Management**: Create and manage document sessions with user isolation
 - **Chunks Management**: Process, search, and manage document chunks with vector capabilities
+- **Direct Vector Upsert**: Insert pre-computed embeddings directly to Qdrant for custom embedding models
 - **Multiple Storage Backends**: MinIO for file storage, PostgreSQL for metadata, Qdrant for vectors
 - **Health Monitoring**: Built-in health checks, metrics collection, and system status monitoring
 - **RESTful API**: Comprehensive API with automatic documentation and OpenAPI support
@@ -118,6 +119,56 @@ If you prefer manual setup:
    pip install -r requirements.txt
    ```
 
+## 🎯 Quick Examples
+
+### Example 1: Upload and Process Documents
+```python
+import requests
+
+# Create a session
+response = requests.post("http://localhost:8000/api/v1/sessions/", json={
+    "user_id": "user123",
+    "expires_in": 24
+})
+session_id = response.json()["session_id"]
+
+# Upload a document
+with open("document.pdf", "rb") as f:
+    files = {"file": f}
+    response = requests.post(
+        f"http://localhost:8000/api/v1/documents/session/{session_id}/upload",
+        files=files
+    )
+```
+
+### Example 2: Direct Vector Upsert (Custom Embeddings)
+```python
+import requests
+
+# Upsert pre-computed embeddings directly to Qdrant
+request_data = {
+    "collection_name": "my_custom_collection",
+    "vector_size": 1024,  # Supports any dimension
+    "points": [
+        {
+            "id": "doc-1-chunk-1",
+            "vector": [0.1] * 1024,  # Your embedding vector
+            "payload": {
+                "chunk_content": "Your document text here",
+                "document_id": "doc-1",
+                "metadata": {"source": "custom"}
+            }
+        }
+    ]
+}
+
+response = requests.post(
+    "http://localhost:8000/api/v1/rag/vectors/upsert",
+    json=request_data
+)
+```
+📖 **Full documentation**: [Direct Upsert Guide](docs/DIRECT_UPSERT_GUIDE.md)
+
 ## 🔧 Configuration
 
 The application uses environment variables for configuration. Key settings include:
@@ -167,6 +218,13 @@ The application uses environment variables for configuration. Key settings inclu
 - `POST /api/v1/chunks/session/search` - Search chunks without session
 - `PUT /api/v1/chunks/session/{session_id}/chunks` - Update chunks in session
 - `DELETE /api/v1/chunks/session/{session_id}/chunks` - Delete chunks from session
+
+#### RAG & Vector Operations
+- `POST /api/v1/rag/vectors/upsert` - 🆕 Direct upsert of pre-computed embedding vectors to Qdrant
+  - Support for custom vector dimensions (384, 512, 768, 1024, 1536, etc.)
+  - Batch operations for efficient bulk inserts
+  - Flexible for any embedding model
+  - See [Direct Upsert Guide](docs/DIRECT_UPSERT_GUIDE.md) for details
 
 #### Health & Monitoring
 - `GET /api/v1/health/` - Basic application health status
@@ -225,11 +283,13 @@ python -m pytest tests/ -v                             # Verbose output
 - **Integration Tests**: Cross-service functionality and workflows
 - **Health Tests**: System health and monitoring verification
 - **Database Tests**: Database operations and connectivity
+- **Vector Upsert Tests**: Direct embedding vector insertion and validation
 
 ### Test Coverage
 - ✅ **Document Management**: Upload, download, metadata, deletion
 - ✅ **Session Management**: CRUD operations, expiration, user sessions
 - ✅ **Chunks Management**: Upload, search, update, delete operations
+- ✅ **RAG & Vector Operations**: Direct vector upsert with custom dimensions
 - ✅ **Health Monitoring**: Health checks, metrics, component status
 - ✅ **Error Handling**: Exception cases and edge conditions
 - ✅ **Database Integration**: PostgreSQL, MinIO, and Qdrant operations
@@ -322,6 +382,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - ✅ Document upload, storage, and management
 - ✅ Session management with user isolation
 - ✅ Chunks processing and management
+- ✅ Direct Vector Upsert endpoint for custom embeddings
 - ✅ Health monitoring and metrics collection
 - ✅ Administrative tools and cleanup operations
 - ✅ Comprehensive API documentation
